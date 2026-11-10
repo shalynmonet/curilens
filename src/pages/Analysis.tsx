@@ -23,10 +23,14 @@ export default function Analysis() {
     (async () => {
       if (!id) return;
       const data = await getAnalysis(id);
+      if (data && data.status !== 'completed') {
+        navigate(`/processing/${id}`, { replace: true });
+        return;
+      }
       setAnalysis(data);
       setLoading(false);
     })();
-  }, [id]);
+  }, [id, navigate]);
 
   const handleCopy = () => {
     if (!analysis) return;

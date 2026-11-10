@@ -1,6 +1,7 @@
 import { createClient } from "npm:@supabase/supabase-js@2.57.4";
 import { GoogleGenAI } from "npm:@google/genai@1.21.0";
 import { Clocked, retrieveEvidence, validatedVerdict } from "./clocked.ts";
+import { retryTransient, evidenceOnlyResult } from "./resilience.ts";
 
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
@@ -75,10 +76,11 @@ function createSupabaseAdmin() {
 }
 
 async function updateStatus(supabase: any, analysisId: string, status: string) {
-  await supabase
+  const { error } = await supabase
     .from("analyses")
     .update({ status, updated_at: new Date().toISOString() })
     .eq("id", analysisId);
+  if (error) throw new Error('Could not save analysis progress.');
 }
 
 async function markError(supabase: any, analysisId: string, message: string) {
@@ -117,13 +119,14 @@ async function extractTextWithGemini(imageUrl: string): Promise<string> {
 
   const { data: base64Data, mimeType } = await fetchImageAsBase64(imageUrl);
 
-  const response = await ai.models.generateContent({
+  const response = await retryTransient(() => ai.models.generateContent({
     model,
     contents: [
       { text: "Extract ALL text visible in this screenshot exactly as written. Preserve the original wording, capitalization, and punctuation. Do not summarize or interpret. If the image contains social media posts, captions, comments, or headlines, transcribe them faithfully. Output only the extracted text, nothing else." },
       { inlineData: { data: base64Data, mimeType } },
     ],
-  });
+    config: { httpOptions: { timeout: 15000 }, maxOutputTokens: 5000 },
+  }));
 
   return response.text?.trim() || "";
 }
@@ -215,13 +218,15 @@ CRITICAL RULES:
 
 Return ONLY the JSON object, no other text.`;
 
-  const response = await ai.models.generateContent({
+  const response = await retryTransient(() => ai.models.generateContent({
     model,
     contents: prompt,
     config: {
       responseMimeType: "application/json",
+      httpOptions: { timeout: 15000 },
+      maxOutputTokens: 5000,
     },
-  });
+  }));
 
   const text = response.text;
   if (!text) throw new Error("No content returned from Gemini analysis");
@@ -314,6 +319,10 @@ async function persistResults(
   result: LLMAnalysisResult,
   verificationResults: any[]
 ) {
+  // A retry replaces any incomplete prior write; foreign keys remove its source rows.
+  const { error: clearClaims } = await supabase.from('claims').delete().eq('analysis_id', analysisId);
+  const { error: clearRecommendations } = await supabase.from('recommendations').delete().eq('analysis_id', analysisId);
+  if (clearClaims || clearRecommendations) throw new Error('Could not replace incomplete results.');
   const llmClaims = new Map((result.claims || []).map((c) => [c.claim_index, c]));
   const supportedCount = verificationResults.filter((v) => v.verification_status === "supported").length;
   const contradictedCount = verificationResults.filter((v) => v.verification_status === "contradicted").length;
@@ -330,7 +339,6 @@ async function persistResults(
       unresolved_count: unresolvedCount,
       factual_rewrite: result.factual_rewrite,
       exploratory_rewrite: result.exploratory_rewrite,
-      status: "completed",
       updated_at: new Date().toISOString(),
     })
     .eq("id", analysisId);
@@ -359,13 +367,12 @@ async function persistResults(
       .single();
 
     if (claimError || !insertedClaim) {
-      console.error("Failed to insert claim:", claimError);
-      continue;
+      throw new Error('Could not save the claim results.');
     }
 
     for (const source of verification.sources) {
       if (!source.url) continue;
-      await supabase.from("evidence_sources").insert({
+      const { error: sourceError } = await supabase.from("evidence_sources").insert({
         claim_id: insertedClaim.id,
         title: source.title,
         url: source.url,
@@ -375,6 +382,7 @@ async function persistResults(
         passage: source.passage,
         relevance: source.relevance,
       });
+      if (sourceError) throw new Error('Could not save the source passages.');
     }
   }
 
@@ -390,9 +398,12 @@ async function persistResults(
       classification: rec.classification,
     });
   }
+  // The results page must not see completion before claim/source writes finish.
+  await updateStatus(supabase, analysisId, 'completed');
 }
 
 Deno.serve(async (req: Request) => {
+  let activeAnalysisId: string | undefined;
   if (req.method === "OPTIONS") {
     return new Response(null, { status: 200, headers: corsHeaders });
   }
@@ -454,6 +465,13 @@ Deno.serve(async (req: Request) => {
     if (!stored || stored.image_path !== imagePath || !stored.user_id || !imagePath.startsWith(`${stored.user_id}/`)) {
       return new Response(JSON.stringify({ error: 'Screenshot does not belong to this analysis' }), { status: 403, headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
     }
+    activeAnalysisId = analysisId;
+    const startedAt = Date.now();
+    // Only one run per record; retries are allowed after a recorded failure.
+    const { data: claimed } = await supabase.from('analyses')
+      .update({ status: 'extracting', error_message: null, updated_at: new Date().toISOString() })
+      .eq('id', analysisId).in('status', ['pending', 'error']).select('id').maybeSingle();
+    if (!claimed) return new Response(JSON.stringify({ status: 'already_started', analysisId }), { headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
 
     await updateStatus(supabase, analysisId, "extracting");
 
@@ -505,10 +523,9 @@ Deno.serve(async (req: Request) => {
     let evidenceDocuments: EvidenceDocument[] = [];
     let retrievalNote = '';
     try {
-      const retrieved = await retrieveEvidence(prepared.query, Deno.env.get('TAVILY_API_KEY') || '');
-      for (const document of retrieved) {
-        if (await clocked.guard(document.text)) evidenceDocuments.push(document);
-      }
+      const retrieved = (await retrieveEvidence(prepared.query, Deno.env.get('TAVILY_API_KEY') || '')).map(d => ({ ...d, text: d.text.slice(0, 3000) }));
+      // Screen source documents together to avoid one guard request per result.
+      if (retrieved.length && await clocked.guard(retrieved.map(d => `[${d.id}]\n${d.text}`).join('\n\n'))) evidenceDocuments = retrieved;
       if (!evidenceDocuments.length) retrievalNote = 'No usable source passages were retrieved. Verification remains unresolved.';
     } catch { retrievalNote = 'Evidence retrieval failed. Verification remains unresolved.'; }
     await updateStatus(supabase, analysisId, "verifying");
@@ -517,18 +534,19 @@ Deno.serve(async (req: Request) => {
     }
     const verificationResults = await verifyWithClocked(identifiedClaims, evidenceDocuments, clocked, prepared.risk === 'high_stakes');
 
+    await supabase.from('analyses').update({ clocked_checks: clocked.runs }).eq('id', analysisId);
+
     await updateStatus(supabase, analysisId, "rewriting");
 
     let analysisResult: LLMAnalysisResult;
+    let writingUnavailable = false;
     try {
+      if (Date.now() - startedAt > 85000) throw new Error('Writing deferred to preserve completed evidence checks.');
       analysisResult = await analyzeAndRewriteWithGemini(extractedText, verificationResults);
     } catch (err) {
-      const message = describeFailure("analysis", err);
-      await markError(supabase, analysisId, message);
-      return new Response(
-        JSON.stringify({ error: message }),
-        { status: 500, headers: { ...corsHeaders, "Content-Type": "application/json" } }
-      );
+      writingUnavailable = true;
+      console.warn('Writing unavailable; preserving evidence checks.');
+      analysisResult = evidenceOnlyResult(verificationResults, prepared.topic);
     }
 
     // Enforce source provenance in code rather than trusting generated URLs.
@@ -538,7 +556,7 @@ Deno.serve(async (req: Request) => {
     analysisResult.concise_assessment += notes.length ? '\n\n' + notes.join(' ') : '';
     const { error: checkError } = await supabase.from('analyses').update({
       clocked_checks: clocked.runs,
-      research_notes: { risk: prepared.risk, redacted_items: prepared.privacyCount, notes },
+      research_notes: { risk: prepared.risk, redacted_items: prepared.privacyCount, writing_unavailable: writingUnavailable, notes },
     }).eq('id', analysisId);
     if (checkError) throw new Error('Could not save checks. Apply the Clocked checks migration first.');
     await persistResults(supabase, analysisId, analysisResult, verificationResults);
@@ -548,7 +566,8 @@ Deno.serve(async (req: Request) => {
       { headers: { ...corsHeaders, "Content-Type": "application/json" } }
     );
   } catch (err) {
-    console.error("Analyze function error:", err);
+    console.error("Analyze function could not complete.");
+    if (activeAnalysisId) await markError(createSupabaseAdmin(), activeAnalysisId, 'We could not finish this analysis. Please retry from the progress screen.');
     return new Response(
       JSON.stringify({ error: "Something went wrong while analyzing this screenshot. Please try again." }),
       { status: 500, headers: { ...corsHeaders, "Content-Type": "application/json" } }

@@ -20,17 +20,20 @@ export function validatedVerdict(claim: string, result: Json, documents: Evidenc
 }
 export class Clocked {
   readonly runs: ClockedRun[] = [];
+  private deadline = Date.now() + 100000;
   constructor(private key: string, private transport: typeof fetch = fetch) {}
   skip(endpoint: string, detail: string) {
     this.runs.push({ endpoint, status: 'skipped', detail });
   }
   async call(endpoint: string, body: Json): Promise<Json | null> {
     if (!this.key) { this.skip(endpoint, 'Clocked is not configured.'); return null; }
+    const remaining = this.deadline - Date.now();
+    if (remaining < 1000) { this.skip(endpoint, 'Time limit reached; unchecked claims remain unresolved.'); return null; }
     try {
       const response = await this.transport(`https://clocked.rezolve.ai/clocked/${endpoint}`, {
         method: 'POST',
         headers: { Authorization: `Bearer ${this.key}`, 'Content-Type': 'application/json', 'Idempotency-Key': crypto.randomUUID() },
-        body: JSON.stringify(body), signal: AbortSignal.timeout(45000),
+        body: JSON.stringify(body), signal: AbortSignal.timeout(Math.min(20000, remaining)),
       });
       if (!response.ok) throw new Error(`HTTP ${response.status}`);
       const result = await response.json();

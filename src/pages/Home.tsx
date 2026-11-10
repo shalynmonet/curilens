@@ -2,6 +2,7 @@ import { useCallback, useRef, useState } from 'react';
 import { Upload, Image as ImageIcon, Loader2, AlertCircle, ScanSearch } from 'lucide-react';
 import { useNavigate } from 'react-router-dom';
 import Logo from '@/components/Logo';
+import HoundstoothBar from '@/components/HoundstoothBar';
 import { uploadScreenshot, createAnalysis, submitForAnalysis, getRecentAnalyses } from '@/lib/api';
 import { isSupabaseConfigured } from '@/lib/supabase';
 import { EmptyState } from '@/components/shared';
@@ -82,9 +83,10 @@ export default function Home() {
 
   return (
     <div className="pt-12 pb-8 animate-fadeIn">
-      <header className="flex items-center justify-between mb-10">
-        <Logo size="md" />
+      <header className="mb-4">
+        <Logo />
       </header>
+      <HoundstoothBar className="mb-10" />
 
       <section className="text-center mb-10">
         <div className="inline-flex items-center gap-2 px-3 py-1 rounded-full bg-brass-100/60 text-brass-600 text-xs font-medium tracking-wide mb-5 animate-fadeInSlow">

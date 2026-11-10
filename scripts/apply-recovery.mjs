@@ -1,5 +1,5 @@
 (async () => {
-  const fs = await import('node:fs');
+  const fs = require('fs');
   const paths = ['src/pages/Analysis.tsx', 'src/pages/Processing.tsx', 'src/pages/ShareSetup.tsx', 'supabase/functions/analyze/index.ts', 'supabase/functions/analyze/clocked.ts', 'supabase/functions/analyze/resilience.ts'];
   for (const path of paths) {
     const response = await fetch('https://raw.githubusercontent.com/shalynmonet/curilens/86ce179/' + path);

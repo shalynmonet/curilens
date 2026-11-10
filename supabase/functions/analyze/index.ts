@@ -15,8 +15,30 @@ function getGeminiClient(): GoogleGenAI {
   return new GoogleGenAI({ apiKey });
 }
 
+const DEFAULT_GEMINI_MODEL = "gemini-3.1-flash-lite";
+
 function getGeminiModel(): string {
-  return Deno.env.get("GEMINI_MODEL") || "gemini-2.5-flash";
+  return Deno.env.get("GEMINI_MODEL") || DEFAULT_GEMINI_MODEL;
+}
+
+function describeFailure(stage: string, err: unknown): string {
+  const status = (err as { status?: unknown })?.status;
+  const message = err instanceof Error ? err.message : String(err);
+  console.error(`${stage} failed`, {
+    providerStatus: typeof status === "number" ? status : null,
+    detail: message.slice(0, 300),
+  });
+
+  if (typeof status === "number" && (status === 429 || status === 503)) {
+    return "The AI service is busy right now. Please try this screenshot again in a few minutes.";
+  }
+  if (typeof status === "number" && (status === 401 || status === 403)) {
+    return "Curilens could not connect to the AI service right now. Please try again later.";
+  }
+  if (typeof status === "number" && status === 404) {
+    return "The AI model for this step is not available. The team needs to update the model setting.";
+  }
+  return `We could not finish the ${stage}. Please try this screenshot again.`;
 }
 
 interface LLMAnalysisResult {
@@ -411,7 +433,7 @@ Deno.serve(async (req: Request) => {
         research: hasGemini,
         clocked: hasClocked,
         rewrite: hasGemini,
-        geminiModel: Deno.env.get("GEMINI_MODEL") || "gemini-2.5-flash",
+        geminiModel: getGeminiModel(),
       }),
       { headers: { ...corsHeaders, "Content-Type": "application/json" } }
     );
@@ -467,9 +489,10 @@ Deno.serve(async (req: Request) => {
     try {
       extractedText = await extractTextWithGemini(imageUrl);
     } catch (err) {
-      await markError(supabase, analysisId, `Text extraction failed: ${err.message}`);
+      const message = describeFailure("text extraction", err);
+      await markError(supabase, analysisId, message);
       return new Response(
-        JSON.stringify({ error: err.message }),
+        JSON.stringify({ error: message }),
         { status: 500, headers: { ...corsHeaders, "Content-Type": "application/json" } }
       );
     }
@@ -505,7 +528,17 @@ Deno.serve(async (req: Request) => {
 
     await updateStatus(supabase, analysisId, "rewriting");
 
-    const analysisResult = await analyzeAndRewriteWithGemini(extractedText, verificationResults);
+    let analysisResult: LLMAnalysisResult;
+    try {
+      analysisResult = await analyzeAndRewriteWithGemini(extractedText, verificationResults);
+    } catch (err) {
+      const message = describeFailure("analysis", err);
+      await markError(supabase, analysisId, message);
+      return new Response(
+        JSON.stringify({ error: message }),
+        { status: 500, headers: { ...corsHeaders, "Content-Type": "application/json" } }
+      );
+    }
 
     await persistResults(supabase, analysisId, analysisResult, verificationResults);
 
@@ -516,7 +549,7 @@ Deno.serve(async (req: Request) => {
   } catch (err) {
     console.error("Analyze function error:", err);
     return new Response(
-      JSON.stringify({ error: err.message }),
+      JSON.stringify({ error: "Something went wrong while analyzing this screenshot. Please try again." }),
       { status: 500, headers: { ...corsHeaders, "Content-Type": "application/json" } }
     );
   }

@@ -136,6 +136,22 @@ export default function Analysis() {
 
       {activeTab === 'overview' && (
         <div className="space-y-5 animate-fadeIn">
+          {!!analysis.clocked_checks?.length && (
+            <div className="card p-5">
+              <h3 className="section-title mb-2">Research checks</h3>
+              <p className="text-xs text-midnight-400 mb-3">Completed means the API returned a response. It does not certify source quality or establish truth.</p>
+              <div className="space-y-2">
+                {analysis.clocked_checks.map((check, index) => (
+                  <div key={`${check.endpoint}-${index}`} className="text-sm text-midnight-500 border-b border-ivory-200 pb-2">
+                    <span className="font-medium">{({ pii: 'Protect · contact data', injection: 'Guard · instructions', extract: 'Extract · claims', decide: 'Decide · risk', fill: 'Fill · research details', script: 'Inspect · code', rerank: 'Rerank · relevance', compare: 'Compare · sources', grounding: 'Verify · evidence' } as Record<string, string>)[check.endpoint] || check.endpoint}</span>
+                    <span className="ml-2">{check.status}</span>
+                    <p className="text-xs text-midnight-400 mt-1">{check.detail}</p>
+                  </div>
+                ))}
+              </div>
+              {!!analysis.research_notes?.redacted_items && <p className="text-xs mt-3">Contact or identifying details were removed from the research text. The original screenshot remains in your private library.</p>}
+            </div>
+          )}
           {analysis.concise_assessment && (
             <div className="card-elevated p-5">
               <h3 className="section-title mb-2">Assessment</h3>

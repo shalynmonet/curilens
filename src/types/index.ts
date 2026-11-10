@@ -9,6 +9,8 @@ export type RecommendationClassification = 'supports' | 'challenges' | 'contextu
 export type RewriteMode = 'factual' | 'exploratory';
 
 export interface AnalysisRecord {
+  clocked_checks?: { endpoint: string; status: 'completed' | 'failed' | 'skipped'; detail: string }[];
+  research_notes?: { risk?: string; redacted_items?: number; notes?: string[] };
   id: string;
   title: string;
   topic: string;

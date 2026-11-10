@@ -22,7 +22,7 @@ export default function Settings() {
     research: 'unknown',
     clocked: 'unknown',
     rewrite: 'unknown',
-    geminiModel: 'gemini-2.5-flash',
+    geminiModel: 'gemini-3.1-flash-lite',
   });
 
   useEffect(() => {
@@ -44,7 +44,7 @@ export default function Settings() {
             research: data.research ? 'connected' : 'not_configured',
             clocked: data.clocked ? 'connected' : 'not_configured',
             rewrite: data.rewrite ? 'connected' : 'not_configured',
-            geminiModel: data.geminiModel || 'gemini-2.5-flash',
+            geminiModel: data.geminiModel || 'gemini-3.1-flash-lite',
           });
         } else {
           setStatuses((prev) => ({
@@ -169,7 +169,7 @@ export default function Settings() {
               { name: 'VITE_SUPABASE_URL', desc: 'Supabase project URL', public: true },
               { name: 'VITE_SUPABASE_ANON_KEY', desc: 'Supabase anonymous key', public: true },
               { name: 'GEMINI_API_KEY', desc: 'Google Gemini API key (OCR, claims, rewrites)', public: false },
-              { name: 'GEMINI_MODEL', desc: 'Optional. Overrides the Gemini model (default: gemini-2.5-flash)', public: false, optional: true },
+              { name: 'GEMINI_MODEL', desc: 'Optional. Overrides the Gemini model (default: gemini-3.1-flash-lite)', public: false, optional: true },
               { name: 'CLOCKED_API_KEY', desc: 'Clocked AI verification API key', public: false },
             ].map((env) => (
               <div key={env.name} className="flex items-center justify-between gap-2 py-1.5">

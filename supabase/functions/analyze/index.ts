@@ -1,0 +1,523 @@
+import { createClient } from "npm:@supabase/supabase-js@2.57.4";
+import { GoogleGenAI } from "npm:@google/genai@1.21.0";
+
+const corsHeaders = {
+  "Access-Control-Allow-Origin": "*",
+  "Access-Control-Allow-Methods": "GET, POST, PUT, DELETE, OPTIONS",
+  "Access-Control-Allow-Headers": "Content-Type, Authorization, X-Client-Info, Apikey",
+};
+
+function getGeminiClient(): GoogleGenAI {
+  const apiKey = Deno.env.get("GEMINI_API_KEY");
+  if (!apiKey) {
+    throw new Error("GEMINI_API_KEY is not configured. Text extraction and analysis require a Gemini API key.");
+  }
+  return new GoogleGenAI({ apiKey });
+}
+
+function getGeminiModel(): string {
+  return Deno.env.get("GEMINI_MODEL") || "gemini-2.5-flash";
+}
+
+interface LLMAnalysisResult {
+  title: string;
+  topic: string;
+  concise_assessment: string;
+  claims: {
+    claim_index: number;
+    claim_text: string;
+    claim_type: string;
+    explanation: string;
+    evidence_summary: string;
+    uncertainty: string | null;
+  }[];
+  factual_rewrite: string;
+  exploratory_rewrite: string;
+  recommendations: {
+    title: string;
+    author: string;
+    publication_info: string | null;
+    url: string;
+    relevance_explanation: string;
+    classification: string;
+  }[];
+}
+
+function createSupabaseAdmin() {
+  return createClient(
+    Deno.env.get("SUPABASE_URL")!,
+    Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!,
+    { auth: { persistSession: false } }
+  );
+}
+
+async function updateStatus(supabase: any, analysisId: string, status: string) {
+  await supabase
+    .from("analyses")
+    .update({ status, updated_at: new Date().toISOString() })
+    .eq("id", analysisId);
+}
+
+async function markError(supabase: any, analysisId: string, message: string) {
+  await supabase
+    .from("analyses")
+    .update({ status: "error", error_message: message, updated_at: new Date().toISOString() })
+    .eq("id", analysisId);
+}
+
+async function getSignedImageUrl(supabase: any, imagePath: string): Promise<string> {
+  const { data } = await supabase.storage
+    .from("screenshots")
+    .createSignedUrl(imagePath, 3600);
+  return data?.signedUrl || "";
+}
+
+async function fetchImageAsBase64(imageUrl: string): Promise<{ data: string; mimeType: string }> {
+  const response = await fetch(imageUrl);
+  if (!response.ok) {
+    throw new Error(`Failed to fetch image for Gemini: ${response.status}`);
+  }
+  const blob = await response.blob();
+  const arrayBuffer = await blob.arrayBuffer();
+  const bytes = new Uint8Array(arrayBuffer);
+  let binary = "";
+  for (let i = 0; i < bytes.length; i++) {
+    binary += String.fromCharCode(bytes[i]);
+  }
+  const base64 = btoa(binary);
+  return { data: base64, mimeType: blob.type || "image/png" };
+}
+
+async function extractTextWithGemini(imageUrl: string): Promise<string> {
+  const ai = getGeminiClient();
+  const model = getGeminiModel();
+
+  const { data: base64Data, mimeType } = await fetchImageAsBase64(imageUrl);
+
+  const response = await ai.models.generateContent({
+    model,
+    contents: [
+      { text: "Extract ALL text visible in this screenshot exactly as written. Preserve the original wording, capitalization, and punctuation. Do not summarize or interpret. If the image contains social media posts, captions, comments, or headlines, transcribe them faithfully. Output only the extracted text, nothing else." },
+      { inlineData: { data: base64Data, mimeType } },
+    ],
+  });
+
+  return response.text?.trim() || "";
+}
+
+async function identifyClaimsWithGemini(extractedText: string): Promise<{ claim_text: string }[]> {
+  const ai = getGeminiClient();
+  const model = getGeminiModel();
+
+  const response = await ai.models.generateContent({
+    model,
+    contents: `Extract all assessable claims from this text. Separate content into individually assessable claims. Distinguish factual assertions from personal opinions, metaphors, philosophical interpretations, predictions, and unverifiable statements. Only include claims that can be factually assessed, not opinions or metaphors. Return JSON: {"claims": [{"claim_text": "the claim"}]}\n\nText:\n${extractedText}`,
+    config: {
+      responseMimeType: "application/json",
+    },
+  });
+
+  const text = response.text;
+  if (!text) return [{ claim_text: extractedText.slice(0, 500) }];
+
+  try {
+    const parsed = JSON.parse(text);
+    return parsed.claims || [{ claim_text: extractedText.slice(0, 500) }];
+  } catch {
+    return [{ claim_text: extractedText.slice(0, 500) }];
+  }
+}
+
+async function analyzeAndRewriteWithGemini(
+  extractedText: string,
+  verifiedClaims: { claim_text: string; verification_status: string; sources: any[] }[]
+): Promise<LLMAnalysisResult> {
+  const ai = getGeminiClient();
+  const model = getGeminiModel();
+
+  const verificationContext = verifiedClaims
+    .map((c, i) => `claim_index ${i}: "${c.claim_text}" — Status: ${c.verification_status}. Sources: ${c.sources.length}`)
+    .join("\n");
+
+  const prompt = `You are Curilens, an AI-powered curiosity engine that transforms screenshots into evidence-backed knowledge.
+
+Your mission is to preserve curiosity while improving accuracy. Never dismiss an interesting idea merely because it is speculative. Instead, explain its evidentiary status and guide toward credible resources.
+
+Here is the text extracted from a screenshot:
+"""
+${extractedText}
+"""
+
+Here are the verification results from the Clocked AI fact-checking API:
+${verificationContext || "No Clocked verification was available for these claims."}
+
+Produce a JSON object with this exact structure:
+{
+  "title": "A short, compelling title for this analysis (max 8 words)",
+  "topic": "A topic category (e.g., 'Health & Medicine', 'History', 'Physics', 'Philosophy')",
+  "concise_assessment": "2-3 sentences summarizing what the user should know. Distinguish between established facts, evidence-supported interpretations, unresolved hypotheses, and speculation.",
+  "claims": [
+    {
+      "claim_index": 0,
+      "claim_text": "The exact claim text",
+      "claim_type": "factual | opinion | metaphor | philosophical | prediction | unverifiable",
+      "explanation": "Detailed explanation of the evidentiary status. If a claim is unsupported, say so — don't call it false.",
+      "evidence_summary": "Summary of what evidence supports or contradicts this claim",
+      "uncertainty": "Description of relevant uncertainty, or null if none"
+    }
+  ],
+  "factual_rewrite": "A scientifically or historically grounded explanation that corrects misinformation, removes unsupported certainty, and preserves verified information. Reference the evidence used.",
+  "exploratory_rewrite": "A thoughtful explanation that preserves the original idea's philosophical or speculative appeal while clearly separating established facts from open questions and imaginative interpretations. Reference the evidence used.",
+  "recommendations": [
+    {
+      "title": "Real book, paper, or article title",
+      "author": "Real author or organization",
+      "publication_info": "Publication details if available, or null",
+      "url": "Real, verified URL to access this resource",
+      "relevance_explanation": "Why this resource is relevant",
+      "classification": "supports | challenges | contextualizes | explores"
+    }
+  ]
+}
+
+CRITICAL RULES:
+- Provide 3-5 high-quality recommendations. Prioritize peer-reviewed research, original publications, university publications, and reputable books.
+- Do NOT invent sources, citations, authors, or research findings. Use only real, verifiable resources.
+- Do NOT present a thematically related source as evidence that an unsupported claim is true.
+- Classify each recommendation honestly: "supports" (backs the claim), "challenges" (contradicts it), "contextualizes" (provides background), or "explores" (opens further investigation).
+- Return exactly one claims entry per claim_index listed in the verification results, using the same claim_index.
+- If Clocked verification was not available, note that clearly in the assessment.
+- The factual rewrite must be grounded in the Clocked verification results above, not your own independent judgment about claim accuracy.
+
+Return ONLY the JSON object, no other text.`;
+
+  const response = await ai.models.generateContent({
+    model,
+    contents: prompt,
+    config: {
+      responseMimeType: "application/json",
+    },
+  });
+
+  const text = response.text;
+  if (!text) throw new Error("No content returned from Gemini analysis");
+
+  return JSON.parse(text) as LLMAnalysisResult;
+}
+
+const CLOCKED_GROUNDING_URL = "https://clocked.rezolve.ai/clocked/grounding";
+
+interface EvidenceDocument {
+  id: string;
+  title: string;
+  url: string;
+  text: string;
+}
+
+interface VerificationResult {
+  claim_index: number;
+  claim_text: string;
+  verification_status: string;
+  sources: { title: string; url: string; passage: string; relevance: string }[];
+}
+
+function mapClockedVerdict(verdict: string): string {
+  if (verdict === "supported") return "supported";
+  if (verdict === "contradicted") return "contradicted";
+  if (verdict === "not_stated") return "insufficient_evidence";
+  return "unresolved";
+}
+
+async function verifyWithClocked(
+  claims: { claim_text: string }[],
+  documents: EvidenceDocument[]
+): Promise<VerificationResult[]> {
+  const apiKey = Deno.env.get("CLOCKED_API_KEY");
+  const unresolved = (index: number, claimText: string): VerificationResult => ({
+    claim_index: index,
+    claim_text: claimText,
+    verification_status: "unresolved",
+    sources: [],
+  });
+
+  if (!apiKey || documents.length === 0) {
+    return claims.map((c, i) => unresolved(i, c.claim_text));
+  }
+
+  const results: VerificationResult[] = [];
+  for (let i = 0; i < claims.length; i++) {
+    const claim = claims[i];
+    try {
+      const response = await fetch(CLOCKED_GROUNDING_URL, {
+        method: "POST",
+        headers: {
+          "Authorization": `Bearer ${apiKey}`,
+          "Content-Type": "application/json",
+          "Idempotency-Key": crypto.randomUUID(),
+        },
+        body: JSON.stringify({
+          question: claim.claim_text,
+          answer: claim.claim_text,
+          documents: documents.map((d) => ({ id: d.id, text: d.text })),
+          evidence: "all",
+          threshold: 0.65,
+          instructions: "Judge only whether the supplied documents support this claim.",
+        }),
+      });
+
+      if (!response.ok) {
+        console.error("Clocked grounding request failed:", response.status);
+        results.push(unresolved(i, claim.claim_text));
+        continue;
+      }
+
+      const data = await response.json();
+      if (!Array.isArray(data.claims) || data.claims.length !== 1) {
+        results.push(unresolved(i, claim.claim_text));
+        continue;
+      }
+
+      const verdict = data.claims[0];
+      const evidenceDoc = documents.find((d) => d.id === verdict.evidence?.document);
+      const sources = evidenceDoc && evidenceDoc.url && verdict.evidence?.quote
+        ? [{
+            title: evidenceDoc.title,
+            url: evidenceDoc.url,
+            passage: verdict.evidence.quote,
+            relevance: "Passage returned by Clocked grounding",
+          }]
+        : [];
+
+      results.push({
+        claim_index: i,
+        claim_text: claim.claim_text,
+        verification_status: mapClockedVerdict(verdict.verdict),
+        sources,
+      });
+    } catch (err) {
+      console.error("Clocked grounding error:", err instanceof Error ? err.message : "unknown");
+      results.push(unresolved(i, claim.claim_text));
+    }
+  }
+
+  return results;
+}
+
+function isHttpsUrl(value: string | undefined): boolean {
+  if (!value) return false;
+  try {
+    return new URL(value).protocol === "https:";
+  } catch {
+    return false;
+  }
+}
+
+async function persistResults(
+  supabase: any,
+  analysisId: string,
+  result: LLMAnalysisResult,
+  verificationResults: any[]
+) {
+  const llmClaims = new Map((result.claims || []).map((c) => [c.claim_index, c]));
+  const supportedCount = verificationResults.filter((v) => v.verification_status === "supported").length;
+  const contradictedCount = verificationResults.filter((v) => v.verification_status === "contradicted").length;
+  const unresolvedCount = verificationResults.filter((v) => v.verification_status === "unresolved" || v.verification_status === "insufficient_evidence").length;
+
+  const { error: updateError } = await supabase
+    .from("analyses")
+    .update({
+      title: result.title,
+      topic: result.topic,
+      concise_assessment: result.concise_assessment,
+      supported_count: supportedCount,
+      contradicted_count: contradictedCount,
+      unresolved_count: unresolvedCount,
+      factual_rewrite: result.factual_rewrite,
+      exploratory_rewrite: result.exploratory_rewrite,
+      status: "completed",
+      updated_at: new Date().toISOString(),
+    })
+    .eq("id", analysisId);
+
+  if (updateError) {
+    console.error("Failed to update analysis:", updateError);
+    throw new Error("Failed to save analysis results");
+  }
+
+  for (let i = 0; i < verificationResults.length; i++) {
+    const verification = verificationResults[i];
+    const claim = llmClaims.get(i);
+
+    const { data: insertedClaim, error: claimError } = await supabase
+      .from("claims")
+      .insert({
+        analysis_id: analysisId,
+        claim_text: verification.claim_text,
+        claim_type: claim?.claim_type || "unverifiable",
+        verification_status: verification.verification_status,
+        explanation: claim?.explanation || "No analysis was returned for this claim.",
+        evidence_summary: claim?.evidence_summary || "",
+        uncertainty: claim?.uncertainty ?? null,
+      })
+      .select("id")
+      .single();
+
+    if (claimError || !insertedClaim) {
+      console.error("Failed to insert claim:", claimError);
+      continue;
+    }
+
+    for (const source of verification.sources) {
+      if (!source.url) continue;
+      await supabase.from("evidence_sources").insert({
+        claim_id: insertedClaim.id,
+        title: source.title,
+        url: source.url,
+        author: source.author,
+        publication: source.publication,
+        date: source.date,
+        passage: source.passage,
+        relevance: source.relevance,
+      });
+    }
+  }
+
+  for (const rec of result.recommendations) {
+    if (!isHttpsUrl(rec.url)) continue;
+    await supabase.from("recommendations").insert({
+      analysis_id: analysisId,
+      title: rec.title,
+      author: rec.author,
+      publication_info: rec.publication_info,
+      url: rec.url,
+      relevance_explanation: rec.relevance_explanation,
+      classification: rec.classification,
+    });
+  }
+}
+
+Deno.serve(async (req: Request) => {
+  if (req.method === "OPTIONS") {
+    return new Response(null, { status: 200, headers: corsHeaders });
+  }
+
+  if (req.method === "GET") {
+    const hasGemini = !!Deno.env.get("GEMINI_API_KEY");
+    const hasClocked = !!Deno.env.get("CLOCKED_API_KEY");
+
+    return new Response(
+      JSON.stringify({
+        ocr: hasGemini,
+        research: hasGemini,
+        clocked: hasClocked,
+        rewrite: hasGemini,
+        geminiModel: Deno.env.get("GEMINI_MODEL") || "gemini-2.5-flash",
+      }),
+      { headers: { ...corsHeaders, "Content-Type": "application/json" } }
+    );
+  }
+
+  if (req.method !== "POST") {
+    return new Response(
+      JSON.stringify({ error: "Method not allowed" }),
+      { status: 405, headers: { ...corsHeaders, "Content-Type": "application/json" } }
+    );
+  }
+
+  try {
+    const { analysisId, imagePath } = await req.json();
+    if (!analysisId || !imagePath) {
+      return new Response(
+        JSON.stringify({ error: "Missing analysisId or imagePath" }),
+        { status: 400, headers: { ...corsHeaders, "Content-Type": "application/json" } }
+      );
+    }
+
+    const supabase = createSupabaseAdmin();
+
+    const bearer = (req.headers.get("Authorization") || "").replace(/^Bearer\s+/i, "");
+    if (bearer !== Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")) {
+      const { data: userData } = await supabase.auth.getUser(bearer);
+      const { data: owned } = await supabase
+        .from("analyses")
+        .select("id")
+        .eq("id", analysisId)
+        .eq("user_id", userData.user?.id ?? "")
+        .maybeSingle();
+      if (!owned) {
+        return new Response(
+          JSON.stringify({ error: "Analysis not found" }),
+          { status: 404, headers: { ...corsHeaders, "Content-Type": "application/json" } }
+        );
+      }
+    }
+
+    await updateStatus(supabase, analysisId, "extracting");
+
+    const imageUrl = await getSignedImageUrl(supabase, imagePath);
+    if (!imageUrl) {
+      await markError(supabase, analysisId, "Could not access the uploaded screenshot.");
+      return new Response(
+        JSON.stringify({ error: "Could not access screenshot" }),
+        { status: 500, headers: { ...corsHeaders, "Content-Type": "application/json" } }
+      );
+    }
+
+    let extractedText: string;
+    try {
+      extractedText = await extractTextWithGemini(imageUrl);
+    } catch (err) {
+      await markError(supabase, analysisId, `Text extraction failed: ${err.message}`);
+      return new Response(
+        JSON.stringify({ error: err.message }),
+        { status: 500, headers: { ...corsHeaders, "Content-Type": "application/json" } }
+      );
+    }
+
+    if (!extractedText.trim()) {
+      await markError(supabase, analysisId, "No readable text was found in the screenshot.");
+      return new Response(
+        JSON.stringify({ error: "No text found in screenshot" }),
+        { status: 400, headers: { ...corsHeaders, "Content-Type": "application/json" } }
+      );
+    }
+
+    await supabase
+      .from("analyses")
+      .update({ extracted_text: extractedText, updated_at: new Date().toISOString() })
+      .eq("id", analysisId);
+
+    await updateStatus(supabase, analysisId, "identifying");
+
+    let identifiedClaims: { claim_text: string }[];
+    try {
+      identifiedClaims = await identifyClaimsWithGemini(extractedText);
+    } catch {
+      identifiedClaims = [{ claim_text: extractedText.slice(0, 500) }];
+    }
+
+    await updateStatus(supabase, analysisId, "researching");
+
+    await updateStatus(supabase, analysisId, "verifying");
+
+    const evidenceDocuments: EvidenceDocument[] = [];
+    const verificationResults = await verifyWithClocked(identifiedClaims, evidenceDocuments);
+
+    await updateStatus(supabase, analysisId, "rewriting");
+
+    const analysisResult = await analyzeAndRewriteWithGemini(extractedText, verificationResults);
+
+    await persistResults(supabase, analysisId, analysisResult, verificationResults);
+
+    return new Response(
+      JSON.stringify({ status: "completed", analysisId }),
+      { headers: { ...corsHeaders, "Content-Type": "application/json" } }
+    );
+  } catch (err) {
+    console.error("Analyze function error:", err);
+    return new Response(
+      JSON.stringify({ error: err.message }),
+      { status: 500, headers: { ...corsHeaders, "Content-Type": "application/json" } }
+    );
+  }
+});

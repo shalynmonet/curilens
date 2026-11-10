@@ -1,0 +1,5 @@
+[functions.share]
+verify_jwt = false
+
+[functions.analyze]
+verify_jwt = true

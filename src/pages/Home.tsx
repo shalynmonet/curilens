@@ -1,4 +1,4 @@
-import { useCallback, useRef, useState } from 'react';
+import { useCallback, useRef, useState, useEffect } from 'react';
 import { Upload, Image as ImageIcon, Loader2, AlertCircle, ScanSearch } from 'lucide-react';
 import { useNavigate } from 'react-router-dom';
 import Logo from '@/components/Logo';
@@ -6,7 +6,6 @@ import HoundstoothBar from '@/components/HoundstoothBar';
 import { uploadScreenshot, createAnalysis, submitForAnalysis, getRecentAnalyses } from '@/lib/api';
 import { isSupabaseConfigured } from '@/lib/supabase';
 import { EmptyState } from '@/components/shared';
-import { useEffect } from 'react';
 
 const MAX_FILE_SIZE = 10 * 1024 * 1024;
 const ACCEPTED_TYPES = ['image/png', 'image/jpeg', 'image/jpg', 'image/webp', 'image/heic', 'image/heif'];

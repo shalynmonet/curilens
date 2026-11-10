@@ -43,9 +43,8 @@ iPhone Screenshot → iOS Share Sheet → Curilens /api/share endpoint
 | `VITE_SUPABASE_URL` | Frontend | Supabase project URL |
 | `VITE_SUPABASE_ANON_KEY` | Frontend | Supabase anonymous key |
 | `GEMINI_API_KEY` | Edge Function (secret) | Google Gemini API key |
-| `GEMINI_MODEL` | Edge Function (secret) | Gemini model name (default: `gemini-2.5-flash`) |
+| `GEMINI_MODEL` | Edge Function (optional) | Gemini model override (default: `gemini-2.5-flash`) |
 | `CLOCKED_API_KEY` | Edge Function (secret) | Clocked AI verification API key |
-| `CLOCKED_API_URL` | Edge Function (secret) | Clocked API endpoint URL |
 
 All API keys are stored as Supabase Edge Function secrets and never exposed in frontend code.
 

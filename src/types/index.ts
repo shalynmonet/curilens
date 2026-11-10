@@ -13,6 +13,7 @@ export interface AnalysisRecord {
   title: string;
   topic: string;
   status: AnalysisStatus;
+  image_path: string | null;
   image_url: string | null;
   extracted_text: string | null;
   extracted_text_edited: string | null;

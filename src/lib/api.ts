@@ -5,24 +5,43 @@ const EDGE_FUNCTION_BASE = import.meta.env.VITE_SUPABASE_URL
   ? `${import.meta.env.VITE_SUPABASE_URL}/functions/v1`
   : '';
 
-function getAuthHeaders(): Record<string, string> {
+async function getAuthHeaders(): Promise<Record<string, string>> {
   const headers: Record<string, string> = {
     'Content-Type': 'application/json',
   };
   const anonKey = import.meta.env.VITE_SUPABASE_ANON_KEY as string;
-  if (anonKey) {
-    headers['Authorization'] = `Bearer ${anonKey}`;
-    headers['apikey'] = anonKey;
-  }
+  const { data } = supabase ? await supabase.auth.getSession() : { data: { session: null } };
+  const token = data.session?.access_token || anonKey;
+  if (anonKey) headers['apikey'] = anonKey;
+  if (token) headers['Authorization'] = `Bearer ${token}`;
   return headers;
 }
 
-export async function uploadScreenshot(file: File): Promise<{ path: string; url: string } | null> {
+async function getCurrentUserId(): Promise<string | null> {
+  if (!supabase) return null;
+  const { data } = await supabase.auth.getUser();
+  return data.user?.id ?? null;
+}
+
+export async function getScreenshotUrl(path: string): Promise<string> {
+  if (!supabase || !isSupabaseConfigured || !path) return '';
+  const { data, error } = await supabase.storage.from('screenshots').createSignedUrl(path, 3600);
+  if (error) {
+    console.error('Screenshot link error:', error.message);
+    return '';
+  }
+  return data.signedUrl;
+}
+
+export async function uploadScreenshot(file: File): Promise<{ path: string } | null> {
   if (!supabase || !isSupabaseConfigured) return null;
+
+  const userId = await getCurrentUserId();
+  if (!userId) return null;
 
   const ext = file.name.split('.').pop() || 'png';
   const fileName = `${Date.now()}-${Math.random().toString(36).slice(2, 10)}.${ext}`;
-  const path = `uploads/${fileName}`;
+  const path = `${userId}/${fileName}`;
 
   const { error } = await supabase.storage.from('screenshots').upload(path, file, {
     contentType: file.type,
@@ -30,31 +49,27 @@ export async function uploadScreenshot(file: File): Promise<{ path: string; url:
   });
 
   if (error) {
-    console.error('Upload error:', error);
+    console.error('Upload error:', error.message);
     return null;
   }
 
-  const { data: urlData } = supabase.storage.from('screenshots').createSignedUrl(path, 3600);
-  const url = urlData?.signedUrl || path;
-
-  return { path, url };
+  return { path };
 }
 
-export async function createAnalysis(imagePath: string, imageUrl: string): Promise<string | null> {
+export async function createAnalysis(imagePath: string): Promise<string | null> {
   if (!supabase || !isSupabaseConfigured) return null;
 
   const { data, error } = await supabase
     .from('analyses')
     .insert({
       image_path: imagePath,
-      image_url: imageUrl,
       status: 'pending',
     })
     .select('id')
     .single();
 
   if (error) {
-    console.error('Create analysis error:', error);
+    console.error('Create analysis error:', error.message);
     return null;
   }
 
@@ -67,7 +82,7 @@ export async function submitForAnalysis(analysisId: string, imagePath: string): 
   try {
     const response = await fetch(`${EDGE_FUNCTION_BASE}/analyze`, {
       method: 'POST',
-      headers: getAuthHeaders(),
+      headers: await getAuthHeaders(),
       body: JSON.stringify({ analysisId, imagePath }),
     });
 
@@ -97,7 +112,8 @@ export async function getAnalysis(id: string): Promise<AnalysisRecord | null> {
     return null;
   }
 
-  const { data: claims } = await supabase
+  const db = supabase;
+  const { data: claims } = await db
     .from('claims')
     .select('*')
     .eq('analysis_id', id)
@@ -105,7 +121,7 @@ export async function getAnalysis(id: string): Promise<AnalysisRecord | null> {
 
   const claimsWithSources = await Promise.all(
     (claims || []).map(async (claim) => {
-      const { data: sources } = await supabase
+      const { data: sources } = await db
         .from('evidence_sources')
         .select('*')
         .eq('claim_id', claim.id)
@@ -144,7 +160,8 @@ export async function getAnalysis(id: string): Promise<AnalysisRecord | null> {
     title: analysis.title || 'Untitled Analysis',
     topic: analysis.topic || '',
     status: analysis.status,
-    image_url: analysis.image_url,
+    image_path: analysis.image_path,
+    image_url: await getScreenshotUrl(analysis.image_path),
     extracted_text: analysis.extracted_text,
     extracted_text_edited: analysis.extracted_text_edited,
     concise_assessment: analysis.concise_assessment,
@@ -182,12 +199,13 @@ export async function getRecentAnalyses(limit = 5): Promise<AnalysisRecord[]> {
 
   if (error || !data) return [];
 
-  return data.map((a) => ({
+  return Promise.all(data.map(async (a) => ({
     id: a.id,
     title: a.title || 'Untitled Analysis',
     topic: a.topic || '',
     status: a.status,
-    image_url: a.image_url,
+    image_path: a.image_path,
+    image_url: a.image_path ? await getScreenshotUrl(a.image_path) : null,
     extracted_text: a.extracted_text,
     extracted_text_edited: a.extracted_text_edited,
     concise_assessment: a.concise_assessment,
@@ -203,7 +221,7 @@ export async function getRecentAnalyses(limit = 5): Promise<AnalysisRecord[]> {
     error_message: a.error_message,
     created_at: a.created_at,
     updated_at: a.updated_at,
-  }));
+  })));
 }
 
 export async function getAllAnalyses(): Promise<AnalysisRecord[]> {
@@ -216,12 +234,13 @@ export async function getAllAnalyses(): Promise<AnalysisRecord[]> {
 
   if (error || !data) return [];
 
-  return data.map((a) => ({
+  return Promise.all(data.map(async (a) => ({
     id: a.id,
     title: a.title || 'Untitled Analysis',
     topic: a.topic || '',
     status: a.status,
-    image_url: a.image_url,
+    image_path: a.image_path,
+    image_url: a.image_path ? await getScreenshotUrl(a.image_path) : null,
     extracted_text: a.extracted_text,
     extracted_text_edited: a.extracted_text_edited,
     concise_assessment: a.concise_assessment,
@@ -237,7 +256,7 @@ export async function getAllAnalyses(): Promise<AnalysisRecord[]> {
     error_message: a.error_message,
     created_at: a.created_at,
     updated_at: a.updated_at,
-  }));
+  })));
 }
 
 export async function deleteAnalysis(id: string): Promise<boolean> {

@@ -1,7 +1,9 @@
 import { useState, type FormEvent } from 'react';
-import { Mail, Loader2, Lock } from 'lucide-react';
+import { Mail, Loader2 } from 'lucide-react';
 import { Link } from 'react-router-dom';
 import { useAuth } from '@/contexts/AuthContext';
+import Logo from '@/components/Logo';
+import HoundstoothBar from '@/components/HoundstoothBar';
 
 export default function SignIn() {
   const { sendMagicLink } = useAuth();
@@ -19,9 +21,8 @@ export default function SignIn() {
 
   return (
     <div className="pt-16 pb-8">
-      <div className="w-12 h-12 rounded-2xl bg-midnight-700 text-ivory-50 flex items-center justify-center mb-6">
-        <Lock size={22} />
-      </div>
+      <Logo />
+      <HoundstoothBar className="mt-4 mb-10" />
       <h1 className="text-3xl font-semibold text-midnight-700 leading-tight">Sign in to Curilens</h1>
       <p className="mt-3 text-midnight-500 leading-relaxed">
         Your screenshots and analyses are private to your account. We will email you a one-time sign-in link.

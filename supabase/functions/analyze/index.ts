@@ -420,6 +420,7 @@ Deno.serve(async (req: Request) => {
         clocked: hasClocked,
         rewrite: hasGemini,
         geminiModel: getGeminiModel(),
+        serverRevision: 'recovery-20261110-v2',
       }),
       { headers: { ...corsHeaders, "Content-Type": "application/json" } }
     );

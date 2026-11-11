@@ -6,6 +6,16 @@ const source = readFileSync(new URL('../supabase/functions/analyze/clocked.ts', 
 const js = ts.transpileModule(source, { compilerOptions: { module: ts.ModuleKind.ESNext, target: ts.ScriptTarget.ES2022 } }).outputText;
 const { Clocked, retrieveEvidence, validatedVerdict } = await import('data:text/javascript;base64,' + Buffer.from(js).toString('base64'));
 const response = data => new Response(JSON.stringify(data), { status: 200 });
+test('vision fallback uses documented image response and never treats it as a verification verdict', async () => {
+  const clocked = new Clocked('test', async (_url, init) => {
+    const body = JSON.parse(init.body);
+    assert.deepEqual(body.images, ['data:image/png;base64,aW1hZ2U=']);
+    return response({ mode: 'native_vision', result: { text: 'Actual screenshot text' } });
+  });
+  assert.equal(await clocked.readScreenshot('aW1hZ2U=', 'image/png'), 'Actual screenshot text');
+  assert.equal(clocked.runs[0].endpoint, 'extract');
+  assert.equal(clocked.runs.some(r => r.endpoint === 'grounding'), false);
+});
 test('a verdict requires the exact claim and a real quote from the selected document', () => {
   const docs = [{ id: 'a', text: 'The measured value is 12.', title: 'Measurement', url: 'https://example.org' }];
   const valid = { claims: [{ claim: 'Value is 12', verdict: 'supported', evidence: { document: 'a', quote: 'The measured value is 12.' } }] };

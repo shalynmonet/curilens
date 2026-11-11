@@ -1,9 +1,16 @@
+export function isHardQuota(error: unknown): boolean {
+  const status = (error as { status?: number })?.status;
+  const message = error instanceof Error ? error.message : String((error as { message?: string })?.message || '');
+  return status === 429 && /per.?day|daily|billing|limit:\s*0\b/i.test(message);
+}
+
 export async function retryTransient<T>(operation: () => Promise<T>, wait = (ms: number) => new Promise(resolve => setTimeout(resolve, ms))): Promise<T> {
-  try { return await operation(); } catch (error) {
-    const status = (error as { status?: number })?.status;
-    if (status !== 429 && status !== 503) throw error;
-    await wait(1500);
-    return operation();
+  for (let attempt = 0; ; attempt++) {
+    try { return await operation(); } catch (error) {
+      const status = (error as { status?: number })?.status;
+      if (attempt >= 2 || isHardQuota(error) || (status !== 429 && status !== 503)) throw error;
+      await wait(1500 * 2 ** attempt + Math.floor(Math.random() * 250));
+    }
   }
 }
 

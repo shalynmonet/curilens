@@ -10,12 +10,17 @@ test('busy service is retried once, without changing model', async () => {
   const result = await retryTransient(async () => { if (++calls === 1) throw { status: 503 }; return 'actual result'; }, async () => {});
   assert.equal(calls, 2); assert.equal(result, 'actual result');
 });
-test('authentication and invalid requests never retry; repeated quota errors stop', async () => {
+test('authentication and invalid requests never retry; repeated transient errors stop at three calls', async () => {
   for (const status of [401, 404, 429]) {
     let calls = 0;
     await assert.rejects(retryTransient(async () => { calls++; throw Object.assign(new Error('failed'), { status }); }, async () => {}));
-    assert.equal(calls, status === 429 ? 2 : 1);
+    assert.equal(calls, status === 429 ? 3 : 1);
   }
+});
+test('daily quota exhaustion stops immediately instead of hammering the same model', async () => {
+  let calls = 0;
+  await assert.rejects(retryTransient(async () => { calls++; throw Object.assign(new Error('RequestsPerDay quota exceeded'), { status: 429 }); }, async () => {}));
+  assert.equal(calls, 1);
 });
 test('writing failure preserves supplied statuses and quotes without inventing recommendations', () => {
   const result = evidenceOnlyResult([

@@ -1,7 +1,7 @@
 import { createClient } from "npm:@supabase/supabase-js@2.57.4";
 import { GoogleGenAI } from "npm:@google/genai@1.21.0";
 import { Clocked, retrieveEvidence, validatedVerdict } from "./clocked.ts";
-import { retryTransient, evidenceOnlyResult } from "./resilience.ts";
+import { retryTransient, evidenceOnlyResult, isHardQuota } from "./resilience.ts";
 
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
@@ -32,6 +32,7 @@ function describeFailure(stage: string, err: unknown): string {
   });
 
   if (typeof status === "number" && (status === 429 || status === 503)) {
+    if (isHardQuota(err)) return 'The Gemini API allowance is exhausted. Please retry after its quota resets or review the API account limits.';
     return "The AI service is busy right now. Please try this screenshot again in a few minutes.";
   }
   if (typeof status === "number" && (status === 401 || status === 403)) {
@@ -488,12 +489,15 @@ Deno.serve(async (req: Request) => {
     try {
       extractedText = await extractTextWithGemini(imageUrl);
     } catch (err) {
-      const message = describeFailure("text extraction", err);
-      await markError(supabase, analysisId, message);
-      return new Response(
-        JSON.stringify({ error: message }),
-        { status: 500, headers: { ...corsHeaders, "Content-Type": "application/json" } }
-      );
+      try {
+        const image = await fetchImageAsBase64(imageUrl);
+        extractedText = await clocked.readScreenshot(image.data, image.mimeType);
+      } catch {
+        const message = describeFailure("text extraction", err);
+        await supabase.from('analyses').update({ clocked_checks: clocked.runs }).eq('id', analysisId);
+        await markError(supabase, analysisId, message);
+        return new Response(JSON.stringify({ error: message }), { status: 503, headers: { ...corsHeaders, "Content-Type": "application/json" } });
+      }
     }
 
     if (!extractedText.trim()) {

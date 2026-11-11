@@ -21,7 +21,7 @@ const SHORTCUT_STEPS = [
   'Under Headers, add a header named X-Curilens-Token with your connection token as the value.',
   'Under Request Body, choose Form and add a field named image. Set its value to Shortcut Input.',
   'Add "Get Dictionary Value" and use the key analysisId from the response.',
-  'Add "Open URL" and build the address from your Curilens site address, then /analysis/, then the analysisId.',
+  'Add "Open URL" and build the address from your Curilens site address, then /processing/, then the analysisId. Existing /analysis/ links also open the progress screen until results are ready.',
 ];
 
 export default function ShareSetup() {

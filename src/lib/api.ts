@@ -157,6 +157,8 @@ export async function getAnalysis(id: string): Promise<AnalysisRecord | null> {
 
   return {
     id: analysis.id,
+    clocked_checks: analysis.clocked_checks || [],
+    research_notes: analysis.research_notes || {},
     title: analysis.title || 'Untitled Analysis',
     topic: analysis.topic || '',
     status: analysis.status,

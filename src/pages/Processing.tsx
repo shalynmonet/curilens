@@ -1,6 +1,6 @@
 import { useEffect, useState, useCallback } from 'react';
 import { useNavigate, useParams } from 'react-router-dom';
-import { getAnalysis } from '@/lib/api';
+import { getAnalysis, submitForAnalysis } from '@/lib/api';
 import type { AnalysisRecord, PipelineStage } from '@/types';
 import { StageIcon } from '@/components/shared';
 import { AlertCircle, ArrowRight, CheckCircle2, Edit3 } from 'lucide-react';
@@ -31,6 +31,22 @@ export default function Processing() {
   const [editText, setEditText] = useState('');
   const [isEditing, setIsEditing] = useState(false);
   const [loading, setLoading] = useState(true);
+  const [retrying, setRetrying] = useState(false);
+  const [retryError, setRetryError] = useState('');
+
+  const retryAnalysis = async () => {
+    if (!analysis?.image_path || !id || retrying) return;
+    setRetrying(true);
+    setRetryError('');
+    const success = await submitForAnalysis(id, analysis.image_path);
+    setRetrying(false);
+    if (success) window.location.reload();
+    else {
+      const refreshed = await getAnalysis(id);
+      if (refreshed) setAnalysis(refreshed);
+      setRetryError('The retry could not finish. Please try again in a few minutes.');
+    }
+  };
 
   const fetchAnalysis = useCallback(async () => {
     if (!id) return;
@@ -109,6 +125,10 @@ export default function Processing() {
           <p className="text-sm text-midnight-300 max-w-sm leading-relaxed mb-6">
             {analysis.error_message || 'An error occurred during the analysis pipeline. This may be due to a missing API configuration.'}
           </p>
+          {analysis.image_path && <button onClick={retryAnalysis} disabled={retrying} className="btn-secondary mb-3">
+            {retrying ? 'Retrying analysis…' : 'Retry this screenshot'}
+          </button>}
+          {retryError && <p role="alert" className="text-sm text-rust-600 mb-3">{retryError}</p>}
           <button onClick={() => navigate('/')} className="btn-secondary">
             Back to Home
           </button>
